@@ -43,14 +43,17 @@ def validate(title: str) -> None:
         raise ValueError("title must not be only white space")
     if title != title.strip():
         raise ValueError("title must not have leading or trailing white space")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in title):
+        raise ValueError("title must not contain newline or control characters")
     title.encode("utf-8")
 
 
 def output_dir() -> str:
     """Return the harness output directory, honouring MAKEFUN_OUTPUT_DIR."""
-    raw = os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
-    cleaned = raw.rstrip("/") or "/"
-    return cleaned
+    raw = (os.environ.get("MAKEFUN_OUTPUT_DIR") or "").strip()
+    if not raw:
+        return "/output"
+    return raw.rstrip("/") or "/"
 
 
 def write_entry(title: str, directory: str) -> str:

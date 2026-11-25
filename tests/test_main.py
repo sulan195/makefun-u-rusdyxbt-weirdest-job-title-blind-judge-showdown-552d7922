@@ -8,7 +8,7 @@ slash, output path as a file, unwritable directory, multibyte counting.
 
 import importlib.util
 import os
-import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -66,6 +66,22 @@ class TestTitle(unittest.TestCase):
         with self.assertRaises(ValueError):
             main.validate("é" * 61)
 
+    def test_validate_rejects_internal_newline_and_controls(self):
+        for bad in ("Foo\nBar", "Foo\rBar", "a\tb", "a\x00b", "a\x7fb"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                main.validate(bad)
+
+    def test_validate_rejects_non_string(self):
+        with self.assertRaises(ValueError):
+            main.validate(123)
+
+    def test_validate_rejects_surrogate(self):
+        with self.assertRaises(ValueError):
+            main.validate("a\ud800b")
+
+    def test_validate_accepts_single_character(self):
+        main.validate("x")
+
 
 class TestOutputDir(unittest.TestCase):
     def test_env_var_used(self):
@@ -84,6 +100,14 @@ class TestOutputDir(unittest.TestCase):
     def test_empty_env_falls_back_to_output(self):
         with mock.patch.dict(os.environ, {"MAKEFUN_OUTPUT_DIR": ""}):
             self.assertEqual(main.output_dir(), "/output")
+
+    def test_whitespace_only_env_falls_back_to_output(self):
+        with mock.patch.dict(os.environ, {"MAKEFUN_OUTPUT_DIR": "   "}):
+            self.assertEqual(main.output_dir(), "/output")
+
+    def test_root_env_stays_root(self):
+        with mock.patch.dict(os.environ, {"MAKEFUN_OUTPUT_DIR": "/"}):
+            self.assertEqual(main.output_dir(), "/")
 
 
 class TestWriteEntry(unittest.TestCase):
@@ -138,6 +162,12 @@ class TestWriteEntry(unittest.TestCase):
                 with self.assertRaises(OSError):
                     main.write_entry(main.TITLE, tmp)
 
+    def test_makedirs_failure_propagates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("os.makedirs", side_effect=OSError("cannot create")):
+                with self.assertRaises(OSError):
+                    main.write_entry(main.TITLE, tmp)
+
 
 class TestMainEndToEnd(unittest.TestCase):
     def test_main_returns_zero_and_writes(self):
@@ -160,6 +190,56 @@ class TestMainEndToEnd(unittest.TestCase):
             with mock.patch.dict(os.environ, {"MAKEFUN_OUTPUT_DIR": tmp}):
                 with mock.patch("builtins.open", side_effect=OSError("boom")):
                     self.assertEqual(main.main(), 1)
+
+
+class TestMainSubprocess(unittest.TestCase):
+    """Run main.py as a real CLI process (covers __main__ + side effects)."""
+
+    def test_cli_success_writes_exact_bytes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, MAKEFUN_OUTPUT_DIR=tmp)
+            proc = subprocess.run(
+                [sys.executable, str(REPO / "main.py")],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("24 characters", proc.stdout)
+            self.assertEqual(
+                Path(tmp, "entry.txt").read_bytes(),
+                b"Coffin Parking Attendant",
+            )
+
+    def test_cli_gate_failure_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = Path(tmp, "bad_main.py")
+            source = (REPO / "main.py").read_text(encoding="utf-8")
+            bad.write_text(
+                source.replace(
+                    'TITLE = "Coffin Parking Attendant"',
+                    'TITLE = "x" * 61',
+                ),
+                encoding="utf-8",
+            )
+            env = dict(os.environ, MAKEFUN_OUTPUT_DIR=tmp)
+            proc = subprocess.run(
+                [sys.executable, str(bad)],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("error:", proc.stderr)
+            self.assertFalse(Path(tmp, "entry.txt").exists())
+
+    def test_cli_io_failure_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = Path(tmp, "blocker")
+            blocker.write_text("x", encoding="utf-8")
+            env = dict(os.environ, MAKEFUN_OUTPUT_DIR=str(blocker))
+            proc = subprocess.run(
+                [sys.executable, str(REPO / "main.py")],
+                env=env, capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("error:", proc.stderr)
 
 
 if __name__ == "__main__":
